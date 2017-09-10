@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>London transport discovery</title>
+
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <!-- Scripts -->
+    <script src="https://unpkg.com/react@latest/dist/react.js"></script>
+    <script src="https://unpkg.com/react-dom@latest/dist/react-dom.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6.15.0/babel.min.js"></script>
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css"
+    integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css"
+    integrity="sha384-rHyoN1iRsVXV4nD0JutlnGaslCJuC7uwjduW9SVrLvRYooPp2bWYgmgJQIXwl/Sp" crossorigin="anonymous">
+
+    <style>
+    .pointer {
+        cursor: pointer;
+    }
+    #eager-particles-js {
+        display: none;
+    }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+
+    <script type="text/babel">
+        /*
+        * For the sake of simplicity, everything is put together into one app.
+        * In real world, this is not how it's supposed to be done
+        * Additionally, it should not assume that the user gives permission to access location
+        * It should show a proper error message when location is not supported
+        * It should use Redux and Services to communicate, in stead of being static
+        */
+        let App = React.createClass({
+            // Initializers & data getters
+            getInitialState: function() {
+                return {
+                    tube: [],
+                    dlr: [],
+                    overground: [],
+                    data: [],
+                    active: 1,
+                    latitude: 0,
+                    longitude: 0,
+                    locErr: false,
+                    loading: true,
+                    refreshable: false
+                };
+            },
+            componentWillMount: function() {
+                this.refresh();
+            },
+            httpGet: function(url, passthrough = null) {
+                return new Promise(
+                    function (resolve, reject) {
+                        const request = new XMLHttpRequest();
+                        request.onload = function () {
+                            if (this.status === 200) {
+                                // Success
+                                // Babel wouldn't let {...response: this.response}
+                                let res = this.response;
+                                resolve({passthrough: passthrough, response: res});
+                            } else {
+                                // Something went wrong (404 etc.)
+                                // Should throw a proper Error
+                                reject(this.statusText);
+                            }
+                        };
+                        request.onerror = function () {
+                            reject('XMLHttpRequest Error: ' + this.statusText);
+                        };
+                        request.open('GET', url, true);
+                        request.withCredentials = false;
+                        request.send();
+                    });
+            },
+
+            refresh: function() {
+                this.setState({refreshable: false, loading: true});
+                this.getLocation();
+            },
+
+            // Location
+            setLocation: function(position) {
+                // If they were in componentWillMount, the data would be loaded BEFORE the location was got
+                this.setState({latitude: position.coords.latitude, longitude: position.coords.longitude});
+                this.getDisruptions();
+            },
+            getLocation: function() {
+                if (navigator.geolocation) navigator.geolocation.getCurrentPosition(
+                    this.setLocation,
+                    (error) => { this.setState({locErr: true}); },
+                    // We don't care if it's old or new location, in real app it should be handled better
+                    { maximumAge: Infinity }
+                );
+                // It should show an error message, NOT a console log, but this is cleaner/faster/easier/shorter
+                else {
+                    this.setState({locErr: true});
+                    console.log("Geolocation is not supported by this browser.");
+                }
+            },
+
+            // Live data
+            getDisruptions: function() {
+                // For debug purposes I'm setting a static set of coordinates, so that could check if data correct
+                let lat = this.state.latitude;
+                let lon = this.state.longitude;
+
+                if (this.state.locErr == true) {
+                    // Nothing to do if we have no location...
+                    this.setState({loading: false});
+                    return;
+                }
+
+                /*
+                // These are for testing purposes
+                // Overground
+                lat = 51.531602;
+                lon = -0.1244395;
+                // Subway
+                lat = 51.5235451;
+                lon = -0.1467682;
+                // DLR w/ disruption
+                lat = 51.5094599;
+                lon = 0.0266669;
+                // King's Cross
+                lat = 51.531615;
+                lon = -0.1245119;*/
+
+                this.httpGet(`https://api.tfl.gov.uk/Place?type=NaptanMetroStation,NaptanRailStation&lat=${lat}&lon=${lon}&radius=800`).then(
+                    (response) => {
+                        let json = JSON.parse(response.response);
+                        let data = [];
+                        let entry = {}, place = {};
+                        let finished = 0;
+
+                        for (let i = 0; i < json.places.length; i++) {
+                            place = json.places[i];
+
+                            this.httpGet(`https://api.tfl.gov.uk/stoppoint/${place.id}/disruption`, place).then((res) => {
+                                let disruption = [];
+                                let djson = JSON.parse(res.response);
+                                place = res.passthrough;
+
+                                // Because if we generate entry in the foreach, it'll get out of sync
+                                entry = {
+                                    id: place.id,
+                                    name: place.commonName,
+                                    distance: place.distance,
+                                    modes: {}
+                                };
+
+                                for (let mode of place.lineModeGroups) {
+                                    entry.modes[mode.modeName] = {mode: mode.modeName, lines: mode.lineIdentifier};
+                                }
+
+                                for (let line of djson) {
+                                    if (line.type != 'Information') {
+                                        disruption.push({
+                                            from: line.fromDate,
+                                            to: line.toDate,
+                                            type: line.type,
+                                            mode: line.mode,
+                                            description: line.description,
+                                        });
+                                    }
+                                }
+
+                                entry['disruption'] = disruption;
+                                data.push(entry);
+                                finished++;
+
+                                if (finished == json.places.length) {
+                                    // This is a very dirty way of making sure data and "loading..." is not resolved
+                                    // Until all places have been Get, no matter what order
+
+                                    // Order by distance & name
+                                    data.sort((a, b) => { return a.distance > b.distance ? 1 : (a.name < b.name ? -1 : 0)});
+                                    this.setDisruptions(data);
+                                }
+                            });
+                            // Don't need to handle errors here, if no disruptions then doesn't matter...
+                            // In a proper app ofc there'd be error handling for this query too
+                        }
+                    }, (e) => {
+                        // Again, should be a message to user, not a console.log
+                        console.log('Error getting data', e);
+                        this.setState({loading: false});
+                    }
+                );
+            },
+            setDisruptions: function(data = null) {
+                let tube = [], dlr = [], overground = [];
+                if (data == null) data = this.state.data;
+
+                data.forEach((entry) => {
+                    if (entry.modes.hasOwnProperty('overground') || entry.modes.hasOwnProperty('national-rail')) overground.push(entry);
+                    if (entry.modes.hasOwnProperty('dlr')) dlr.push(entry);
+                    if (entry.modes.hasOwnProperty('tube')) tube.push(entry);
+                });
+
+                this.setState({data: data, tube: tube, dlr: dlr, overground: overground, loading: false, refreshable: true});
+            },
+
+            // Nav handler
+            switch: function(to) {
+                if (to != this.state.active) this.setState({active: to});
+            },
+
+            renderDisruptions: function(mode = 1) {
+                let data = [], result = [], modes = [], disruptions = [];
+                let cls = '';
+                let counter = 0;
+
+                if (mode == 1) {
+                    if (this.state.tube.length < 1) return <p>No data to show</p>;
+                    data = this.state.tube;
+                } else if (mode == 2) {
+                    if (this.state.dlr.length < 1) return <p>No data to show</p>;
+                    data = this.state.dlr;
+                } else if (mode == 3) {
+                    if (this.state.overground.length < 1) return <p>No data to show</p>;
+                    data = this.state.overground;
+                }
+
+                data.forEach((entry) => {
+                    cls = 'panel ';
+                    modes = [];
+                    disruptions = [];
+                    counter++;
+
+                    if (entry.disruption.length > 0) {
+                        cls += 'panel-warning';
+                        entry.disruption.forEach((disr) => {
+                            disruptions.push(<p key={entry.id + disr.mode}>
+                                <strong>{disr.mode.toUpperCase()}</strong> {disr.type}: {disr.description}
+                            </p>);
+                        });
+                    }
+                    else {
+                        cls += 'panel-default';
+                        disruptions.push(<span key={entry.id + 'none'}>No disruptions</span>);
+                    }
+
+                    Object.keys(entry.modes).forEach((key) => {
+                        if (entry.modes[key].lines.length != 1 || entry.modes[key].mode != entry.modes[key].lines[0]) {
+                            modes.push(<li key={key} className="list-group-item"><strong>{entry.modes[key].mode.toUpperCase()}</strong>: {entry.modes[key].lines.join(', ')}</li>);
+                        }
+                    });
+
+                    result.push(<div key={entry.id + counter} className={cls}>
+                        <div className="panel-heading">{entry.name} <small>{Math.round(entry.distance)}m</small></div>
+                        <div className="panel-body">{disruptions}</div>
+                        <ul className="list-group">{modes}</ul>
+                    </div>);
+                });
+
+                return result;
+            },
+            render: function() {
+                let content = <span>Loading...</span>;
+                let refresh = <a className="btn btn-xs btn-primary" onClick={this.refresh}><i className="glyphicon glyphicon-refresh"></i></a>;
+                if (this.state.refreshable == false) refresh = <span></span>;
+
+                if (this.state.locErr) content = <p>Error getting location</p>;
+
+                if (this.state.loading == false) {
+                    if (this.state.data.length < 1) content = <p>No data to show</p>;
+                    else content = this.renderDisruptions(this.state.active);
+                }
+
+                return <div className="container">
+            <div className="row">
+                <div className="col-xs-12">
+                    <h3>
+                        You are at {this.state.latitude.toFixed(4)} : {this.state.longitude.toFixed(4)}  {refresh}
+                    </h3>
+                </div>
+            </div>
+            <div className="row">
+                <div className="col-xs-12">
+                    <ul className="nav nav-tabs nav-justified">
+                        <li role="presentation" className={"pointer" + (this.state.active == 1 ? ' active' : '')}>
+                            <a onClick={() => this.switch(1)}>Tube</a>
+                        </li>
+                        <li role="presentation" className={"pointer" + (this.state.active == 2 ? ' active' : '')}>
+                            <a onClick={() => this.switch(2)}>DLR</a>
+                        </li>
+                        <li role="presentation" className={"pointer" + (this.state.active == 3 ? ' active' : '')}>
+                            <a onClick={() => this.switch(3)}>Overground</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            <div className="row">
+                <div className="col-xs-12">
+                    {content}
+                </div>
+            </div>
+        </div>;
+            }
+        });
+
+        ReactDOM.render(<App></App>, document.getElementById('app'));
+    </script>
+</body>
+</html>
